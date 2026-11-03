@@ -136,23 +136,46 @@ def open_path_in_os(target_path: Path) -> None:
 
 
 def find_media_player() -> Optional[str]:
-    """Detect a media player capable of playing partial (.part) files and live streams."""
-    for cmd in ("mpv", "vlc", "mpc-hc64", "mpc-hc", "potplayer", "potplayermini64", "ffplay"):
+    """Detect a GUI media player capable of playing partial (.part) files and live streams."""
+    # 1. Check GUI media players on PATH first (exclude console-only ffplay here)
+    for cmd in ("vlc", "mpv", "mpc-hc64", "mpc-hc", "mpc-be64", "potplayer", "potplayermini64"):
         found = shutil.which(cmd)
         if found:
             return found
+
+    # 2. Check standard Windows installation directories for VLC, MPV, MPC-HC/BE, PotPlayer
     if sys.platform == "win32":
         win_candidates = [
             Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "VideoLAN" / "VLC" / "vlc.exe",
             Path(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")) / "VideoLAN" / "VLC" / "vlc.exe",
-            Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "MPC-HC" / "mpc-hc64.exe",
-            Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "DAUM" / "PotPlayer" / "PotPlayerMini64.exe",
             Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / "mpv" / "mpv.exe",
+            Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "MPC-HC" / "mpc-hc64.exe",
+            Path(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")) / "MPC-HC" / "mpc-hc.exe",
+            Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "MPC-BE x64" / "mpc-be64.exe",
+            Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "DAUM" / "PotPlayer" / "PotPlayerMini64.exe",
+            Path(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")) / "DAUM" / "PotPlayer" / "PotPlayerMini.exe",
         ]
         for candidate in win_candidates:
             if candidate.exists():
                 return str(candidate)
-    return None
+
+    # 3. Last resort fallback to ffplay
+    return shutil.which("ffplay")
+
+
+def launch_media_player(player_path: str, media_target: str) -> None:
+    """Launch external media player without flashing a console window."""
+    kwargs: dict[str, Any] = {
+        "stdin": subprocess.DEVNULL,
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+    }
+    if sys.platform == "win32" and "ffplay" in Path(player_path).stem.lower():
+        # Pass -autoexit and hide the console window if ffplay is used as fallback
+        kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+        subprocess.Popen([player_path, "-window_title", "yt-dlp Studio Preview", media_target], **kwargs)
+    else:
+        subprocess.Popen([player_path, media_target], **kwargs)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -1494,57 +1517,69 @@ class YtDlpGuiApp(ctk.CTk):
         candidates: list[Path] = []
         if task.part_file:
             p = Path(task.part_file)
-            if p.exists():
-                candidates.append(p)
-            # Also check if yt-dlp created fragment-less base .part
-            if p.name.endswith("-Frag" + p.name.split("-Frag")[-1]):
+            # If yt-dlp is currently on a fragment file (e.g. video.mp4.part-Frag12),
+            # prioritize the main accumulated video.mp4.part file!
+            if "-Frag" in p.name:
                 base_part = p.parent / p.name.split("-Frag")[0]
-                if base_part.exists():
-                    candidates.insert(0, base_part)
+                if base_part.exists() and base_part.stat().st_size > 0:
+                    candidates.append(base_part)
+            if p.exists() and p.stat().st_size > 0 and p not in candidates:
+                candidates.append(p)
 
         if task.output_file:
             out_p = Path(task.output_file)
-            if out_p.exists():
-                candidates.append(out_p)
             part_p = Path(f"{task.output_file}.part")
-            if part_p.exists():
-                candidates.append(part_p)
+            if part_p.exists() and part_p.stat().st_size > 0 and part_p not in candidates:
+                candidates.insert(0, part_p)
+            if out_p.exists() and out_p.stat().st_size > 0 and out_p not in candidates:
+                candidates.append(out_p)
+            # Also check for format-specific DASH part files (e.g. Title [id].f137.mp4.part)
+            if out_p.parent.exists():
+                stem_prefix = out_p.stem[:30]
+                for f_part in sorted(
+                    out_p.parent.glob("*.part"),
+                    key=lambda f: f.stat().st_size,
+                    reverse=True,
+                ):
+                    if stem_prefix in f_part.name and f_part not in candidates and f_part.stat().st_size > 0:
+                        candidates.append(f_part)
 
-        # Fallback: scan task.output_dir for most recently modified .part file
+        # Fallback: scan task.output_dir for largest/most recent non-fragment .part file
         if not candidates and Path(task.output_dir).exists():
-            part_files = sorted(
-                Path(task.output_dir).glob("*.part"),
-                key=lambda f: f.stat().st_mtime,
-                reverse=True,
-            )
+            part_files = [
+                f for f in Path(task.output_dir).glob("*.part")
+                if f.stat().st_size > 0
+            ]
+            part_files.sort(key=lambda f: f.stat().st_mtime, reverse=True)
             candidates.extend(part_files[:1])
 
         player = find_media_player()
 
         if candidates:
             target_part = candidates[0]
-            self.log(f"Previewing partial download: {target_part.name}")
+            player_name = Path(player).name if player else "Default OS Player"
+            self.log(f"Opening preview in {player_name}: {target_part.name}")
             try:
                 if player:
-                    subprocess.Popen([player, str(target_part)])
+                    launch_media_player(player, str(target_part))
                 else:
                     open_path_in_os(target_part)
                 return
             except Exception as e:
                 self.log(f"Failed to preview partial file: {e}")
 
-        # 3. If no local .part file is playable yet, stream URL directly in external player
-        if player and task.url:
-            self.log(f"Streaming live URL in {Path(player).name}: {task.url}")
+        # 3. If no local .part file is playable yet, stream URL directly in VLC/MPV
+        if player and task.url and "ffplay" not in Path(player).stem.lower():
+            self.log(f"Streaming URL in {Path(player).name}: {task.url}")
             try:
-                subprocess.Popen([player, task.url])
+                launch_media_player(player, task.url)
                 return
             except Exception as e:
                 self.log(f"Failed to stream URL in player: {e}")
 
         messagebox.showinfo(
             "Preview Not Ready",
-            "Partial media file is not ready on disk yet, or no compatible player (VLC / MPV / MPC-HC / PotPlayer) was found.",
+            "Partial media file is not ready on disk yet. Wait a few seconds for segments to write, then click 👁 again.",
         )
 
     # ─────────────────────────────────────────────────────────
