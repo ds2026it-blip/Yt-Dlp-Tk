@@ -295,6 +295,8 @@ class QueueItemCard(ctk.CTkFrame):
         self,
         master: Any,
         task: QueueTask,
+        on_move_up: Callable[[QueueTask], None],
+        on_move_down: Callable[[QueueTask], None],
         on_pause: Callable[[QueueTask], None],
         on_resume: Callable[[QueueTask], None],
         on_cancel: Callable[[QueueTask], None],
@@ -312,6 +314,8 @@ class QueueItemCard(ctk.CTkFrame):
             **kwargs,
         )
         self.task = task
+        self.on_move_up = on_move_up
+        self.on_move_down = on_move_down
         self.on_pause = on_pause
         self.on_resume = on_resume
         self.on_cancel = on_cancel
@@ -319,7 +323,45 @@ class QueueItemCard(ctk.CTkFrame):
         self.on_open_folder = on_open_folder
         self.on_play_file = on_play_file
 
-        self.grid_columnconfigure(1, weight=1)
+        self.grid_columnconfigure(2, weight=1)
+
+        # Sequence Reorder Controls (Up / Position / Down)
+        self.order_frame = ctk.CTkFrame(self, fg_color="transparent")
+        self.order_frame.grid(row=0, column=0, rowspan=3, padx=(10, 2), pady=8, sticky="ns")
+
+        self.up_btn = ctk.CTkButton(
+            self.order_frame,
+            text="▲",
+            width=24,
+            height=20,
+            fg_color=BTN_SECONDARY,
+            hover_color=BTN_SECONDARY_HOVER,
+            text_color=TEXT_MAIN,
+            font=ctk.CTkFont(size=10, weight="bold"),
+            command=lambda: self.on_move_up(self.task),
+        )
+        self.up_btn.pack(side="top", pady=(0, 2))
+
+        self.pos_label = ctk.CTkLabel(
+            self.order_frame,
+            text="#1",
+            font=ctk.CTkFont(size=10, weight="bold"),
+            text_color=TEXT_MUTED,
+        )
+        self.pos_label.pack(side="top", pady=1)
+
+        self.down_btn = ctk.CTkButton(
+            self.order_frame,
+            text="▼",
+            width=24,
+            height=20,
+            fg_color=BTN_SECONDARY,
+            hover_color=BTN_SECONDARY_HOVER,
+            text_color=TEXT_MAIN,
+            font=ctk.CTkFont(size=10, weight="bold"),
+            command=lambda: self.on_move_down(self.task),
+        )
+        self.down_btn.pack(side="top", pady=(2, 0))
 
         # Thumbnail or Icon
         self.thumb_label = ctk.CTkLabel(
@@ -333,11 +375,11 @@ class QueueItemCard(ctk.CTkFrame):
         )
         if task.thumbnail_img:
             self.thumb_label.configure(image=task.thumbnail_img, text="")
-        self.thumb_label.grid(row=0, column=0, rowspan=3, padx=(12, 12), pady=10, sticky="ns")
+        self.thumb_label.grid(row=0, column=1, rowspan=3, padx=(6, 12), pady=10, sticky="ns")
 
         # Title + Tag Row
         top_frame = ctk.CTkFrame(self, fg_color="transparent")
-        top_frame.grid(row=0, column=1, sticky="ew", padx=(0, 8), pady=(10, 2))
+        top_frame.grid(row=0, column=2, sticky="ew", padx=(0, 8), pady=(10, 2))
         top_frame.grid_columnconfigure(0, weight=1)
 
         self.title_label = ctk.CTkLabel(
@@ -375,7 +417,7 @@ class QueueItemCard(ctk.CTkFrame):
             fg_color=BTN_SECONDARY,
         )
         self.progress_bar.set(0.0)
-        self.progress_bar.grid(row=1, column=1, sticky="ew", padx=(0, 8), pady=4)
+        self.progress_bar.grid(row=1, column=2, sticky="ew", padx=(0, 8), pady=4)
 
         # Stats Row
         self.stats_label = ctk.CTkLabel(
@@ -385,11 +427,11 @@ class QueueItemCard(ctk.CTkFrame):
             text_color=TEXT_MUTED,
             anchor="w",
         )
-        self.stats_label.grid(row=2, column=1, sticky="ew", padx=(0, 8), pady=(0, 10))
+        self.stats_label.grid(row=2, column=2, sticky="ew", padx=(0, 8), pady=(0, 10))
 
         # Action Buttons Frame
         self.btn_frame = ctk.CTkFrame(self, fg_color="transparent")
-        self.btn_frame.grid(row=0, column=2, rowspan=3, padx=(4, 12), pady=10, sticky="e")
+        self.btn_frame.grid(row=0, column=3, rowspan=3, padx=(4, 12), pady=10, sticky="e")
 
         self.play_btn = ctk.CTkButton(
             self.btn_frame,
@@ -450,6 +492,11 @@ class QueueItemCard(ctk.CTkFrame):
             self.on_cancel(self.task)
         else:
             self.on_remove(self.task)
+
+    def set_order_state(self, index: int, total: int) -> None:
+        self.pos_label.configure(text=f"#{index + 1}")
+        self.up_btn.configure(state="normal" if index > 0 else "disabled")
+        self.down_btn.configure(state="normal" if index < total - 1 else "disabled")
 
     def refresh_ui(self) -> None:
         t = self.task
@@ -1747,6 +1794,8 @@ class YtDlpGuiApp(ctk.CTk):
         card = QueueItemCard(
             self.queue_scroll,
             task=task,
+            on_move_up=lambda t: self.move_task(t, -1),
+            on_move_down=lambda t: self.move_task(t, 1),
             on_pause=self.pause_task,
             on_resume=self.resume_task,
             on_cancel=self.cancel_task,
@@ -1759,6 +1808,27 @@ class YtDlpGuiApp(ctk.CTk):
 
         self.tasks.append(task)
         self.task_cards[task.task_id] = card
+        self._relayout_queue_cards()
+
+    def _relayout_queue_cards(self) -> None:
+        total = len(self.tasks)
+        for idx, t in enumerate(self.tasks):
+            card = self.task_cards.get(t.task_id)
+            if card:
+                card.grid(row=idx, column=0, sticky="ew", padx=6, pady=5)
+                card.set_order_state(idx, total)
+
+    def move_task(self, task: QueueTask, direction: int) -> None:
+        with self.queue_lock:
+            if task not in self.tasks:
+                return
+            idx = self.tasks.index(task)
+            new_idx = idx + direction
+            if new_idx < 0 or new_idx >= len(self.tasks):
+                return
+            self.tasks[idx], self.tasks[new_idx] = self.tasks[new_idx], self.tasks[idx]
+        self._relayout_queue_cards()
+        self._save_prefs()
 
     def _update_queue_header(self) -> None:
         total = len(self.tasks)
@@ -1830,6 +1900,7 @@ class YtDlpGuiApp(ctk.CTk):
             card.destroy()
         if task in self.tasks:
             self.tasks.remove(task)
+        self._relayout_queue_cards()
         self._update_queue_header()
         self._save_prefs()
 
