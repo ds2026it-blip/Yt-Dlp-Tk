@@ -89,6 +89,16 @@ def strip_ansi(text: str) -> str:
     return ANSI_ESCAPE_RE.sub("", text)
 
 
+def truncate_text(text: str, max_chars: int = 80) -> str:
+    """Collapse whitespace/newlines and truncate long strings with an ellipsis."""
+    if not text:
+        return ""
+    cleaned = " ".join(text.split())
+    if len(cleaned) <= max_chars:
+        return cleaned
+    return cleaned[: max_chars - 1].rstrip() + "…"
+
+
 def format_duration(seconds: Optional[float]) -> str:
     if seconds is None or seconds <= 0:
         return "Live / —"
@@ -407,7 +417,7 @@ class QueueItemCard(ctk.CTkFrame):
 
         self.title_label = ctk.CTkLabel(
             top_frame,
-            text=task.title or task.url,
+            text=truncate_text(task.title or task.url, 68),
             font=ctk.CTkFont(size=13, weight="bold"),
             text_color=TEXT_MAIN,
             anchor="w",
@@ -523,7 +533,7 @@ class QueueItemCard(ctk.CTkFrame):
 
     def refresh_ui(self) -> None:
         t = self.task
-        self.title_label.configure(text=t.title or t.url)
+        self.title_label.configure(text=truncate_text(t.title or t.url, 68))
         self.progress_bar.set(max(0.0, min(1.0, t.progress)))
 
         pl_prefix = f"[{t.playlist_progress}] " if t.playlist_progress else ""
@@ -618,7 +628,7 @@ class QueueItemCard(ctk.CTkFrame):
         elif t.status == "Completed":
             self.progress_bar.set(1.0)
             self.progress_bar.configure(progress_color=SUCCESS_COLOR)
-            fname = Path(t.output_file).name if t.output_file else "Finished"
+            fname = truncate_text(Path(t.output_file).name, 52) if t.output_file else "Finished"
             self.stats_label.configure(
                 text=f"{pl_prefix}✔ Completed — {fname} ({t.size_str})",
                 text_color=SUCCESS_COLOR,
@@ -1001,8 +1011,10 @@ class YtDlpGuiApp(ctk.CTk):
             corner_radius=12,
             border_width=1,
             border_color=CARD_BORDER,
+            height=156,
         )
         self.preview_card.grid(row=0, column=0, padx=(0, 8), sticky="nsew")
+        self.preview_card.grid_propagate(False)
         self.preview_card.grid_columnconfigure(1, weight=1)
 
         self.thumb_box = ctk.CTkLabel(
@@ -1020,13 +1032,13 @@ class YtDlpGuiApp(ctk.CTk):
         self.info_title = ctk.CTkLabel(
             self.preview_card,
             text="Ready to Download",
-            font=ctk.CTkFont(size=14, weight="bold"),
+            font=ctk.CTkFont(size=13, weight="bold"),
             text_color=TEXT_MAIN,
             anchor="w",
             justify="left",
-            wraplength=245,
+            wraplength=235,
         )
-        self.info_title.grid(row=0, column=1, padx=(0, 14), pady=(14, 4), sticky="nw")
+        self.info_title.grid(row=0, column=1, padx=(0, 14), pady=(14, 2), sticky="new")
 
         self.info_uploader = ctk.CTkLabel(
             self.preview_card,
@@ -1035,7 +1047,7 @@ class YtDlpGuiApp(ctk.CTk):
             text_color=TEXT_MUTED,
             anchor="w",
         )
-        self.info_uploader.grid(row=1, column=1, padx=(0, 14), pady=2, sticky="nw")
+        self.info_uploader.grid(row=1, column=1, padx=(0, 14), pady=1, sticky="new")
 
         self.info_meta = ctk.CTkLabel(
             self.preview_card,
@@ -1044,7 +1056,7 @@ class YtDlpGuiApp(ctk.CTk):
             text_color=TEXT_MUTED,
             anchor="w",
         )
-        self.info_meta.grid(row=2, column=1, padx=(0, 14), pady=2, sticky="nw")
+        self.info_meta.grid(row=2, column=1, padx=(0, 14), pady=1, sticky="new")
 
         self.info_badge = ctk.CTkLabel(
             self.preview_card,
@@ -1052,10 +1064,10 @@ class YtDlpGuiApp(ctk.CTk):
             font=ctk.CTkFont(size=11, weight="bold"),
             text_color=ACCENT_PRIMARY,
             anchor="w",
-            wraplength=245,
+            wraplength=235,
             justify="left",
         )
-        self.info_badge.grid(row=3, column=1, padx=(0, 14), pady=(4, 14), sticky="sw")
+        self.info_badge.grid(row=3, column=1, padx=(0, 14), pady=(2, 12), sticky="sew")
 
         # 3B. Options & Format Card
         opts_card = ctk.CTkFrame(
@@ -1682,11 +1694,11 @@ class YtDlpGuiApp(ctk.CTk):
         if is_playlist:
             entries = [e for e in (info.get("entries") or []) if e]
             count = info.get("playlist_count") or len(entries)
-            self.info_title.configure(text=f"📑 [Playlist] {title}")
-            self.info_uploader.configure(text=f"Creator: {uploader}")
+            self.info_title.configure(text=truncate_text(f"📑 [Playlist] {title}", 64))
+            self.info_uploader.configure(text=truncate_text(f"Creator: {uploader}", 42))
             self.info_meta.configure(text=f"Total Items: {count} videos")
             self.info_badge.configure(
-                text=f"✔ Playlist detected ({count} items). Filter range via 'Items' (e.g. 1-5).",
+                text=f"✔ Playlist ({count} items). Filter via 'Items' (e.g. 1-5).",
                 text_color=SUCCESS_COLOR,
             )
             self.log(f"Playlist analyzed: '{title}' ({count} items)")
@@ -1694,8 +1706,8 @@ class YtDlpGuiApp(ctk.CTk):
             duration_str = format_duration(info.get("duration"))
             views_str = format_count(info.get("view_count"))
             extractor = info.get("extractor_key") or "Video"
-            self.info_title.configure(text=title)
-            self.info_uploader.configure(text=f"Channel: {uploader}")
+            self.info_title.configure(text=truncate_text(title, 68))
+            self.info_uploader.configure(text=truncate_text(f"Channel: {uploader}", 42))
             self.info_meta.configure(text=f"Duration: {duration_str}   •   Views: {views_str}")
 
             # Build dynamic resolution presets from actual video formats
@@ -2047,7 +2059,7 @@ class YtDlpGuiApp(ctk.CTk):
                 if filepath:
                     task.output_file = filepath
 
-        outtmpl = str(Path(task.output_dir) / "%(title).180B [%(id)s].%(ext)s")
+        outtmpl = str(Path(task.output_dir) / "%(title).120B [%(id)s].%(ext)s")
 
         fmt_spec = task.preset.format_spec
         if not has_ffmpeg and "+" in fmt_spec:
