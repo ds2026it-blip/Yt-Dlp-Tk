@@ -135,6 +135,26 @@ def open_path_in_os(target_path: Path) -> None:
         subprocess.Popen(["xdg-open", str(target_path)])
 
 
+def find_media_player() -> Optional[str]:
+    """Detect a media player capable of playing partial (.part) files and live streams."""
+    for cmd in ("mpv", "vlc", "mpc-hc64", "mpc-hc", "potplayer", "potplayermini64", "ffplay"):
+        found = shutil.which(cmd)
+        if found:
+            return found
+    if sys.platform == "win32":
+        win_candidates = [
+            Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "VideoLAN" / "VLC" / "vlc.exe",
+            Path(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")) / "VideoLAN" / "VLC" / "vlc.exe",
+            Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "MPC-HC" / "mpc-hc64.exe",
+            Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "DAUM" / "PotPlayer" / "PotPlayerMini64.exe",
+            Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / "mpv" / "mpv.exe",
+        ]
+        for candidate in win_candidates:
+            if candidate.exists():
+                return str(candidate)
+    return None
+
+
 # ─────────────────────────────────────────────────────────────
 #  Data Models
 # ─────────────────────────────────────────────────────────────
@@ -170,6 +190,7 @@ class QueueTask:
     size_str: str = "—"
     playlist_progress: str = ""
     output_file: str = ""
+    part_file: str = ""
     error_msg: str = ""
     last_ui_ts: float = 0.0
     stop_reason: str = ""  # "pause" | "cancel"
@@ -200,6 +221,7 @@ class QueueTask:
             "size_str": self.size_str,
             "playlist_progress": self.playlist_progress,
             "output_file": self.output_file,
+            "part_file": self.part_file,
             "error_msg": self.error_msg,
         }
 
@@ -232,6 +254,7 @@ class QueueTask:
             size_str=data.get("size_str", "—"),
             playlist_progress=data.get("playlist_progress", ""),
             output_file=data.get("output_file", ""),
+            part_file=data.get("part_file", ""),
             error_msg=data.get("error_msg", ""),
         )
 
@@ -466,6 +489,13 @@ class QueueItemCard(ctk.CTkFrame):
             )
             self.stats_label.configure(text=stats, text_color=TEXT_MAIN)
             self.progress_bar.configure(progress_color=ACCENT_PRIMARY)
+            if t.part_file or t.progress > 0.01:
+                self.play_btn.configure(
+                    text="👁",
+                    fg_color="#0ea5e9",
+                    hover_color="#0284c7",
+                )
+                self.play_btn.pack(side="left", padx=3, before=self.folder_btn)
             self.pause_resume_btn.configure(
                 text="⏸",
                 fg_color=WARNING_COLOR,
@@ -484,9 +514,16 @@ class QueueItemCard(ctk.CTkFrame):
             size_info = f" ({t.size_str})" if t.size_str and t.size_str != "—" else ""
             self.progress_bar.configure(progress_color=WARNING_COLOR)
             self.stats_label.configure(
-                text=f"{pl_prefix}⏸ Paused at {pct}{size_info} — click ▶ to resume",
+                text=f"{pl_prefix}⏸ Paused at {pct}{size_info} — click ▶ to resume or 👁 to preview",
                 text_color=WARNING_COLOR,
             )
+            if t.part_file or t.progress > 0.01:
+                self.play_btn.configure(
+                    text="👁",
+                    fg_color="#0ea5e9",
+                    hover_color="#0284c7",
+                )
+                self.play_btn.pack(side="left", padx=3, before=self.folder_btn)
             self.pause_resume_btn.configure(
                 text="▶",
                 fg_color=ACCENT_PRIMARY,
@@ -517,6 +554,11 @@ class QueueItemCard(ctk.CTkFrame):
                 text_color=SUCCESS_COLOR,
             )
             if t.output_file and Path(t.output_file).exists():
+                self.play_btn.configure(
+                    text="▶",
+                    fg_color=SUCCESS_COLOR,
+                    hover_color=SUCCESS_HOVER,
+                )
                 self.play_btn.pack(side="left", padx=3, before=self.folder_btn)
             self.action_btn.configure(
                 text="🗑",
@@ -528,9 +570,16 @@ class QueueItemCard(ctk.CTkFrame):
         elif t.status == "Cancelled":
             self.progress_bar.configure(progress_color=WARNING_COLOR)
             self.stats_label.configure(
-                text="⏹ Stopped — click ▶ to resume from partial file",
+                text="⏹ Stopped — click ▶ to resume or 👁 to preview partial file",
                 text_color=WARNING_COLOR,
             )
+            if t.part_file or t.progress > 0.01:
+                self.play_btn.configure(
+                    text="👁",
+                    fg_color="#0ea5e9",
+                    hover_color="#0284c7",
+                )
+                self.play_btn.pack(side="left", padx=3, before=self.folder_btn)
             self.pause_resume_btn.configure(
                 text="▶",
                 fg_color=ACCENT_PRIMARY,
@@ -1383,16 +1432,73 @@ class YtDlpGuiApp(ctk.CTk):
             self.log(f"Failed to open folder: {e}")
 
     def _play_file(self, task: QueueTask) -> None:
-        if not task.output_file:
-            return
-        target = Path(task.output_file)
-        if not target.exists():
-            messagebox.showwarning("File Not Found", f"Could not find:\n{target}")
-            return
-        try:
-            open_path_in_os(target)
-        except Exception as e:
-            self.log(f"Failed to launch media player: {e}")
+        # 1. Completed file playback
+        if task.status == "Completed" and task.output_file:
+            target = Path(task.output_file)
+            if target.exists():
+                try:
+                    open_path_in_os(target)
+                    return
+                except Exception as e:
+                    self.log(f"Failed to launch media player: {e}")
+                    return
+
+        # 2. Partial (.part) file playback while Downloading / Paused / Cancelled
+        candidates: list[Path] = []
+        if task.part_file:
+            p = Path(task.part_file)
+            if p.exists():
+                candidates.append(p)
+            # Also check if yt-dlp created fragment-less base .part
+            if p.name.endswith("-Frag" + p.name.split("-Frag")[-1]):
+                base_part = p.parent / p.name.split("-Frag")[0]
+                if base_part.exists():
+                    candidates.insert(0, base_part)
+
+        if task.output_file:
+            out_p = Path(task.output_file)
+            if out_p.exists():
+                candidates.append(out_p)
+            part_p = Path(f"{task.output_file}.part")
+            if part_p.exists():
+                candidates.append(part_p)
+
+        # Fallback: scan task.output_dir for most recently modified .part file
+        if not candidates and Path(task.output_dir).exists():
+            part_files = sorted(
+                Path(task.output_dir).glob("*.part"),
+                key=lambda f: f.stat().st_mtime,
+                reverse=True,
+            )
+            candidates.extend(part_files[:1])
+
+        player = find_media_player()
+
+        if candidates:
+            target_part = candidates[0]
+            self.log(f"Previewing partial download: {target_part.name}")
+            try:
+                if player:
+                    subprocess.Popen([player, str(target_part)])
+                else:
+                    open_path_in_os(target_part)
+                return
+            except Exception as e:
+                self.log(f"Failed to preview partial file: {e}")
+
+        # 3. If no local .part file is playable yet, stream URL directly in external player
+        if player and task.url:
+            self.log(f"Streaming live URL in {Path(player).name}: {task.url}")
+            try:
+                subprocess.Popen([player, task.url])
+                return
+            except Exception as e:
+                self.log(f"Failed to stream URL in player: {e}")
+
+        messagebox.showinfo(
+            "Preview Not Ready",
+            "Partial media file is not ready on disk yet, or no compatible player (VLC / MPV / MPC-HC / PotPlayer) was found.",
+        )
 
     # ─────────────────────────────────────────────────────────
     #  Metadata Analyzer (yt-dlp extract_info)
@@ -1773,6 +1879,12 @@ class YtDlpGuiApp(ctk.CTk):
 
             if status == "downloading":
                 task.status = "Downloading"
+                tmp_fn = d.get("tmpfilename") or d.get("filename")
+                if tmp_fn and tmp_fn != "-":
+                    task.part_file = str(tmp_fn)
+                if d.get("filename"):
+                    task.output_file = str(d["filename"])
+
                 total = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
                 downloaded = d.get("downloaded_bytes") or 0
 
